@@ -1,0 +1,221 @@
+---
+title: "Semantic Analysis of Airline Tweets"
+author: "Isaac Revette"
+date: "2/9/2020"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T,
+                      results = "hide",
+                      error=FALSE,
+                      warning=FALSE,
+                      message=FALSE)
+
+```
+![Source: https://isg-one.com/](C:/Users/isaac/Desktop/airline_image.jpg)
+
+
+**Introduction:** I did this project in my Social Media Analytics course during my MS in Business Analytics program. Consider the following when evaluating my project:
+
+
+- I am aware there are much more efficient ways to perform sentiment analysis such as SpaCy and Google's BERT model and OpenAI's GPT-2 model.
+- The main purpose of the project is to understand the process sentiment analysis in a simpler form.
+
+
+
+The first block of code loads all required packages for the rest of the project.
+
+
+```{r packages}
+
+rm(list=ls())
+library(DBI)
+library(RMySQL)
+library(tm)
+library(e1071)
+library(pROC)
+library(readr)
+library(data.table)
+library(plyr)
+
+
+```
+
+Next, I needed to pull the tweets from a SQL Database.  
+-*Note: SQL Credentials are no longer active and the code will be using locally saved data.*
+
+
+`driver <- dbDriver("MySQL")`
+`myhost <- "localhost"`
+`mydb   <- "studb"`
+`myacct <- "cis434"`
+`mypwd  <- "LLhtFPbdwiJans8F@S207"`
+
+`conn <- dbConnect(driver, host=myhost, dbname=mydb, myacct, mypwd)`
+
+`airline_data <- dbGetQuery(conn, "SELECT id, airline, tweet FROM AirlineTweets WHERE tag='bZiq4j98$Vru'")`
+
+`dbDisconnect(conn) `
+
+Below I define a simple F1 Evaluation Function to assess model performance.
+
+```{r F1 Evaluation Function}
+Evaluation <- function(pred, true, class)
+{
+    tp <- sum( pred==class & true==class)
+    fp <- sum( pred==class & true!=class)
+    tn <- sum( pred!=class & true!=class)
+    fn <- sum( pred!=class & true==class)
+    precision <- tp/(tp+fp)
+    recall <- tp/(tp+fn)
+    F1 <- 2/(1/precision + 1/recall)
+    F1
+}
+
+```
+
+
+
+The next block of code does creates training and testing data, specifically it:
+
+
+- Loads the complaint and non-complaint data and labels them
+- Creates a **Corpus** of tweets
+- Removes punctuation, numbers, common english words, and extra spaces
+- Creates a document term matrix 
+- Splits the document term matrix into training (75%) and test (25%) data
+
+
+
+
+```{r Prepare Training Data}
+#Training Data
+
+noncomplaints <- data.table(read_csv("C:/Users/isaac/Desktop/School/Social Media Analytics/noncomplaint1700.csv"))
+complaints <- data.table(read_csv("C:/Users/isaac/Desktop/School/Social Media Analytics/complaint1700.csv"))
+
+#Assign Y_labels
+noncomplaints$sentiment = 1
+complaints$sentiment = 0
+
+#Create Corpus for Training
+testTweets = rbind(noncomplaints, complaints)
+docs <- Corpus(VectorSource(testTweets$tweet))
+
+#Create Doc Term Matrix to use as X Variable
+
+dtm.control = list(tolower=T, removePunctuation=T, removeNumbers=T, 
+                   stopwords=c(stopwords("english")), stripWhitespace=T)
+dtm.full <- DocumentTermMatrix(docs, control=dtm.control)
+dtm <- removeSparseTerms(dtm.full,0.99)
+
+
+#Create X and Y Values
+
+X <- as.matrix(dtm)
+Y = testTweets$sentiment
+
+#Create Training and Test Data (75/25 Ratio)
+set.seed(1) # fixing the seed value for the random selection guarantees the same results in repeated runs
+n=length(Y)
+n1=round(n*0.75)
+n2=n-n1
+train=sample(1:n,n1)
+
+
+```
+
+
+
+With the data split and processed, I can train a **Support Vector Machine** to predict tweet sentiment.
+
+*Note: I also tested some other models (Logit, Naive Bayes, etc.) and this model performed best. I then tuned the models parameters to achieve the highest accuracy.*
+
+
+
+```{r Train the SVM Model, results = "markup"}
+svm.model <- svm(Y[train] ~ ., data = X[train,], kernel='radial', gamma = .000058)
+pred <- predict( svm.model, X[-train,] )
+pred.class <- as.numeric( pred>0.6 ) # try varying the threshold distance
+table(pred.class, Y[-train])
+Evaluation( pred.class, Y[-train], 1 )
+#0.7421875.
+#Best Model Found
+
+#Retrain on Full Data
+
+svm.model <- svm(Y ~ ., data = X, kernel='radial', gamma = .000058)
+
+```
+
+
+
+
+The model achieved an **accuracy of 74.2%**, which is better than guessing (50% accuracy).
+
+Now, I can use the model to predict airline sentiments.
+
+The code block below does most of the same thing as when I created the training data, but with a few differences:
+
+
+- I had to tweak the document term matrix to match that of training data or the model wont be able to run
+- It makes predictions on the unlabelled airline tweets
+- Creates a CSV File with predictions
+
+
+
+```{r Use Model to Predict Tweet Sentiment, results = "markup"}
+load("C:/Users/isaac/Desktop/School/Social Media Analytics/socialProject_isaac.RData") #load tweets data for project predicts
+
+docs = Corpus(VectorSource(tweets$tweet))
+#Create Doc Term Matrix to use as X Variable
+
+dtm.control = list(tolower=T, removePunctuation=T, removeNumbers=T, 
+                   stopwords=c(stopwords("english")), stripWhitespace=T)
+dtm.full <- DocumentTermMatrix(docs, control=dtm.control)
+dtm <- removeSparseTerms(dtm.full,0.99)
+
+
+#Create X and Y Values
+X_final <- as.matrix(dtm)
+xx <- data.frame(X_final[,intersect(colnames(X_final),
+                                           colnames(X))]) #remove all terms that didnt appear in training DTM
+yy <- read.table(textConnection(""), col.names = colnames(X),
+                 colClasses = "integer") #create table of all terms in teh original DTM
+
+xx = data.table(xx)
+zz <- rbind.fill(xx, data.table(yy)) #join the two term tables xx and yy to create a table of terms equal to training DTMs
+colnames(zz)[colnames(zz) == 'next.'] = 'next' #one of the columns was named next. but needs to be renamed next
+zz = data.table(zz) #convert to data.table so i can then be converted to matrix (not sure why, but doesnt work otherwise)
+zz = as.matrix(zz)
+zz[is.na(zz) == T] = 0 #replace NAs (filled in line rbind.fill) with zeros
+
+#actually predictions now
+pred <- predict( svm.model,zz )
+pred.class <- as.numeric( pred>0.7 ) #predict everything thats above 0.6 as positive
+
+#create CSV file
+isaac_revette = tweets
+colnames(isaac_revette) = c('id', 'my_eval', 'tweet')
+isaac_revette = isaac_revette[pred.class == 1,]
+isaac_revette$my_eval = NA
+#write.csv(isaac_revette, 'isaac_revette.csv', row.names = FALSE)
+```
+
+
+
+During the project, I had an idea of how many of the validation tweets are complaints. After reviewing the predictions, I found the model was predicting to many complaints. I decided to change the threshold probability of a tweet being a complaint from 60% to 70%. With the new threshold, I identified 323 non-complaint tweets which seemed more accurate. 
+
+**The resulting precision (correctly classifying tweets as non-complaint) was around 61% and the recall (correctly classifying tweets as complaints) was somewhere around 90%.**
+
+
+- *Note: I did not have complete ground truth so I am unable to completely evaluate my precision and recall*
+ 
+
+
+
+
+
